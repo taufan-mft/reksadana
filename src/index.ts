@@ -1,2 +1,2 @@
-export { scrapeAll, fetchStock } from './scraper';
-export type { Fund, Stock } from './types';
+export { scrapeAll, fetchStock, fetchSbn, fetchGlobalEtf } from './scraper';
+export type { Fund, Stock, SbnItem, GlobalEtf } from './types';

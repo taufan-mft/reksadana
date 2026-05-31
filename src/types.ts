@@ -39,3 +39,76 @@ export interface ApiResponse {
   message: string;
   data: string; // AES-encrypted payload
 }
+
+export interface RawSbnItem {
+  serie_id: number;
+  serie_code: string;
+  name: string;
+  coupon_rate: number;
+  due_at: string;
+  first_coupon_date: string;
+  [key: string]: unknown;
+}
+
+export interface SbnApiResponse {
+  message: string;
+  data: RawSbnItem[];
+}
+
+export interface SbnItem {
+  id: number;
+  code: string;
+  name: string;
+  coupon_rate: number;
+  due_at: string;
+  first_coupon_date: string;
+}
+
+export interface GlobalEtf {
+  symbol: string;
+  name: string;
+  last_price: number;
+  currency: string | null;
+  exchange: string | null;
+  quote_type: string | null;
+  price_updated_at: string | null;
+}
+
+export interface RawYahooQuote {
+  symbol?: string;
+  shortName?: string;
+  longName?: string;
+  regularMarketPrice?: number;
+  currency?: string;
+  fullExchangeName?: string;
+  exchange?: string;
+  quoteType?: string;
+  regularMarketTime?: number;
+  [key: string]: unknown;
+}
+
+export interface YahooQuoteApiResponse {
+  quoteResponse?: {
+    result?: RawYahooQuote[];
+    error?: unknown;
+  };
+}
+
+export interface BareksaNavItem {
+  id: string;
+  date: string;
+  value: string;
+}
+
+export interface BareksaFundData {
+  pid: string;
+  pname: string;
+  nav: BareksaNavItem[];
+}
+
+export interface BareksaNavApiResponse {
+  status: boolean;
+  data: {
+    datas: BareksaFundData[];
+  };
+}

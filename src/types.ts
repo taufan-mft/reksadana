@@ -78,18 +78,18 @@ export interface RawYahooQuote {
   symbol?: string;
   shortName?: string;
   longName?: string;
-  regularMarketPrice?: number;
+  regularMarketPrice?: number | string | null;
   currency?: string;
   fullExchangeName?: string;
   exchange?: string;
   quoteType?: string;
-  regularMarketTime?: number;
+  regularMarketTime?: number | string | null;
   [key: string]: unknown;
 }
 
 export interface YahooQuoteApiResponse {
   quoteResponse?: {
-    result?: RawYahooQuote[];
+    result?: Array<RawYahooQuote | Record<string, unknown>>;
     error?: unknown;
   };
 }

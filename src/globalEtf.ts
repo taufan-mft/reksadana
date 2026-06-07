@@ -9,6 +9,55 @@ const YAHOO_CHART_API_URLS = [
   'https://query2.finance.yahoo.com/v8/finance/chart',
   'https://query1.finance.yahoo.com/v8/finance/chart',
 ];
+
+const YAHOO_CHART_REQUEST_PROFILES: Array<{
+  providerLabel: string;
+  buildHeaders: (symbol: string) => Record<string, string>;
+  buildParams: () => Record<string, string | number | boolean>;
+}> = [
+  {
+    providerLabel: 'browser-1m',
+    buildHeaders: (symbol: string) => ({
+      accept: '*/*',
+      'accept-language': 'en-GB,en;q=0.9',
+      priority: 'u=1, i',
+      'sec-ch-ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+      'sec-ch-ua-mobile': '?1',
+      'sec-ch-ua-platform': '"iOS"',
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-site',
+      Referer: `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/`,
+    }),
+    buildParams: () => {
+      const period2 = Math.floor(Date.now() / 1000);
+      const period1 = period2 - 2 * 24 * 60 * 60;
+      return {
+        period1,
+        period2,
+        interval: '1m',
+        includePrePost: true,
+        events: 'div|split|earn',
+        lang: 'en-US',
+        region: 'US',
+        source: 'cosaic',
+      };
+    },
+  },
+  {
+    providerLabel: 'legacy-1d',
+    buildHeaders: () => ({
+      Accept: 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      Referer: 'https://finance.yahoo.com/',
+      'User-Agent': USER_AGENT,
+    }),
+    buildParams: () => ({
+      interval: '1d',
+      range: '1d',
+    }),
+  },
+];
 const STOOQ_QUOTE_API_URL = 'https://stooq.com/q/l/';
 const PROVIDER_TIMEOUT_MS = 5000;
 const ETF_CACHE_PATH = path.resolve(process.cwd(), 'output/globalEtf-cache.json');
@@ -71,44 +120,111 @@ async function useCachedEtfIfAvailable(symbol: string): Promise<GlobalEtf | null
 function logProviderError(provider: string, symbol: string, err: unknown): void {
   const statusCode = err instanceof AxiosError ? err.response?.status ?? null : null;
   const errorCode = err instanceof AxiosError ? err.code ?? null : null;
+  const contentTypeHeader =
+    err instanceof AxiosError
+      ? (err.response?.headers?.['content-type'] as string | string[] | undefined)
+      : undefined;
+  const retryAfterHeader =
+    err instanceof AxiosError ? (err.response?.headers?.['retry-after'] as string | string[] | undefined) : undefined;
+  const contentType = Array.isArray(contentTypeHeader) ? contentTypeHeader.join(',') : contentTypeHeader ?? 'none';
+  const retryAfter = Array.isArray(retryAfterHeader) ? retryAfterHeader.join(',') : retryAfterHeader ?? 'none';
+  const statusClass =
+    statusCode === 429
+      ? 'rate_limited'
+      : typeof statusCode === 'number' && statusCode >= 500
+        ? 'server_error'
+        : typeof statusCode === 'number' && statusCode >= 400
+          ? 'request_error'
+          : 'unknown';
   const message = err instanceof Error ? err.message : String(err);
   console.error(
-    `[fetchGlobalEtf] provider=${provider} symbol=${symbol} status=${statusCode ?? 'none'} code=${errorCode ?? 'none'} message=${message}`,
+    `[fetchGlobalEtf] provider=${provider} symbol=${symbol} status=${statusCode ?? 'none'} class=${statusClass} code=${errorCode ?? 'none'} content_type=${contentType} retry_after=${retryAfter} message=${message}`,
   );
 }
 
-function mapYahooQuoteToGlobalEtf(quote: RawYahooQuote): GlobalEtf | null {
-  if (typeof quote.symbol !== 'string') {
+function logProviderParseIssue(provider: string, symbol: string, reason: string): void {
+  console.error(`[fetchGlobalEtf] provider=${provider} symbol=${symbol} parse=failed reason=${reason}`);
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
 
-  if (typeof quote.regularMarketPrice !== 'number' || Number.isNaN(quote.regularMarketPrice)) {
+  return value as Record<string, unknown>;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function findLatestFiniteNumber(values: unknown): number | null {
+  if (!Array.isArray(values)) {
     return null;
   }
 
-  const displayName =
-    typeof quote.longName === 'string'
-      ? quote.longName
-      : typeof quote.shortName === 'string'
-        ? quote.shortName
-        : quote.symbol;
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const parsed = toFiniteNumber(values[index]);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
 
-  const exchange =
-    typeof quote.fullExchangeName === 'string'
-      ? quote.fullExchangeName
-      : typeof quote.exchange === 'string'
-        ? quote.exchange
-        : null;
+  return null;
+}
 
-  const priceUpdatedAt =
-    typeof quote.regularMarketTime === 'number'
-      ? new Date(quote.regularMarketTime * 1000).toISOString()
-      : null;
+function toIsoFromUnixTimestamp(value: unknown): string | null {
+  const timestamp = toFiniteNumber(value);
+  if (timestamp === null) {
+    return null;
+  }
+
+  const millis = timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function mapYahooQuoteToGlobalEtf(quote: RawYahooQuote, requestedSymbol: string): GlobalEtf | null {
+  const symbol = firstString(quote.symbol, requestedSymbol?.toUpperCase());
+  if (!symbol) {
+    logProviderParseIssue('yahoo-quote', requestedSymbol, 'missing symbol');
+    return null;
+  }
+
+  const marketPrice = toFiniteNumber(quote.regularMarketPrice);
+  if (marketPrice === null) {
+    logProviderParseIssue('yahoo-quote', requestedSymbol, 'missing regularMarketPrice');
+    return null;
+  }
+
+  const displayName = firstString(quote.longName, quote.shortName, symbol) ?? symbol;
+
+  const exchange = firstString(quote.fullExchangeName, quote.exchange);
+  const priceUpdatedAt = toIsoFromUnixTimestamp(quote.regularMarketTime);
 
   return {
-    symbol: quote.symbol,
+    symbol,
     name: displayName,
-    last_price: quote.regularMarketPrice,
+    last_price: marketPrice,
     currency: typeof quote.currency === 'string' ? quote.currency : null,
     exchange,
     quote_type: typeof quote.quoteType === 'string' ? quote.quoteType : null,
@@ -168,68 +284,66 @@ function parseStooqQuote(csvRow: string, requestedSymbol: string): GlobalEtf | n
 }
 
 function parseYahooChartQuote(data: unknown, requestedSymbol: string): GlobalEtf | null {
-  const chart = (data as { chart?: { result?: Array<Record<string, unknown>> } })?.chart;
-  const result = chart?.result?.[0];
+  const dataRecord = toRecord(data);
+  const chart = toRecord(dataRecord?.chart);
+  const resultList = Array.isArray(chart?.result) ? chart.result : null;
+  if (!resultList?.length) {
+    logProviderParseIssue('yahoo-chart', requestedSymbol, 'missing chart.result[]');
+    return null;
+  }
+
+  const result = toRecord(resultList[0]);
   if (!result) {
+    logProviderParseIssue('yahoo-chart', requestedSymbol, 'chart.result[0] is not an object');
     return null;
   }
 
-  const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
-  const priceFromMeta = meta.regularMarketPrice;
-  let lastPrice = typeof priceFromMeta === 'number' && !Number.isNaN(priceFromMeta) ? priceFromMeta : null;
+  const meta = toRecord(result.meta) ?? {};
+  let lastPrice = toFiniteNumber(meta.regularMarketPrice);
 
   if (lastPrice === null) {
-    const indicators = (result.indicators as Record<string, unknown> | undefined) ?? {};
-    const quote = Array.isArray(indicators.quote)
-      ? (indicators.quote[0] as { close?: Array<number | null> } | undefined)
-      : undefined;
-    const closes = Array.isArray(quote?.close) ? quote.close : [];
-    for (let index = closes.length - 1; index >= 0; index -= 1) {
-      const value = closes[index];
-      if (typeof value === 'number' && !Number.isNaN(value)) {
-        lastPrice = value;
-        break;
-      }
-    }
+    const indicators = toRecord(result.indicators) ?? {};
+    const quotes = Array.isArray(indicators.quote) ? indicators.quote : [];
+    const firstQuote = toRecord(quotes[0]);
+    lastPrice = findLatestFiniteNumber(firstQuote?.close);
   }
 
   if (lastPrice === null) {
+    lastPrice = toFiniteNumber(meta.chartPreviousClose) ?? toFiniteNumber(meta.previousClose);
+  }
+
+  if (lastPrice === null) {
+    logProviderParseIssue(
+      'yahoo-chart',
+      requestedSymbol,
+      'price missing in meta.regularMarketPrice, indicators.quote[0].close, and previous close fields',
+    );
     return null;
   }
 
-  const regularMarketTime = meta.regularMarketTime;
-  const priceUpdatedAt =
-    typeof regularMarketTime === 'number' ? new Date(regularMarketTime * 1000).toISOString() : null;
-
-  const shortName = typeof meta.shortName === 'string' ? meta.shortName : null;
+  const priceUpdatedAt = toIsoFromUnixTimestamp(meta.regularMarketTime);
+  const name = firstString(meta.longName, meta.shortName, requestedSymbol.toUpperCase()) ?? requestedSymbol.toUpperCase();
 
   return {
     symbol: requestedSymbol.toUpperCase(),
-    name: shortName ?? requestedSymbol.toUpperCase(),
+    name,
     last_price: lastPrice,
     currency: typeof meta.currency === 'string' ? meta.currency : null,
-    exchange: typeof meta.exchangeName === 'string' ? meta.exchangeName : null,
+    exchange: firstString(meta.fullExchangeName, meta.exchangeName),
     quote_type: typeof meta.instrumentType === 'string' ? meta.instrumentType : 'ETF',
     price_updated_at: priceUpdatedAt,
   };
 }
 
 function mapSparkMetaToGlobalEtf(meta: Record<string, unknown>, requestedSymbol: string): GlobalEtf | null {
-  const marketPrice = meta.regularMarketPrice;
-  if (typeof marketPrice !== 'number' || Number.isNaN(marketPrice)) {
+  const marketPrice = toFiniteNumber(meta.regularMarketPrice) ?? toFiniteNumber(meta.previousClose);
+  if (marketPrice === null) {
+    logProviderParseIssue('yahoo-spark', requestedSymbol, 'missing regularMarketPrice and previousClose');
     return null;
   }
 
-  const name =
-    typeof meta.longName === 'string'
-      ? meta.longName
-      : typeof meta.shortName === 'string'
-        ? meta.shortName
-        : requestedSymbol.toUpperCase();
-
-  const regularMarketTime = meta.regularMarketTime;
-  const priceUpdatedAt =
-    typeof regularMarketTime === 'number' ? new Date(regularMarketTime * 1000).toISOString() : null;
+  const name = firstString(meta.longName, meta.shortName, requestedSymbol.toUpperCase()) ?? requestedSymbol.toUpperCase();
+  const priceUpdatedAt = toIsoFromUnixTimestamp(meta.regularMarketTime);
 
   return {
     symbol: requestedSymbol.toUpperCase(),
@@ -243,15 +357,31 @@ function mapSparkMetaToGlobalEtf(meta: Record<string, unknown>, requestedSymbol:
 }
 
 function parseYahooSparkQuote(data: unknown, requestedSymbol: string): GlobalEtf | null {
-  const spark = (data as { spark?: { result?: Array<Record<string, unknown>> } })?.spark;
-  const sparkResult = spark?.result?.find((entry) => {
-    const symbol = entry.symbol;
+  const dataRecord = toRecord(data);
+  const spark = toRecord(dataRecord?.spark);
+  const results = Array.isArray(spark?.result) ? spark.result : null;
+  if (!results?.length) {
+    logProviderParseIssue('yahoo-spark', requestedSymbol, 'missing spark.result[]');
+    return null;
+  }
+
+  const matched = results.find((entry) => {
+    const record = toRecord(entry);
+    const symbol = record?.symbol;
     return typeof symbol === 'string' && symbol.toUpperCase() === requestedSymbol.toUpperCase();
   });
 
+  const sparkResult = toRecord(matched ?? results[0]);
+  if (!sparkResult) {
+    logProviderParseIssue('yahoo-spark', requestedSymbol, 'spark.result entry is not an object');
+    return null;
+  }
+
   const response = Array.isArray(sparkResult?.response) ? sparkResult.response[0] : null;
-  const meta = response && typeof response === 'object' ? (response as { meta?: Record<string, unknown> }).meta : null;
+  const responseRecord = toRecord(response);
+  const meta = toRecord(responseRecord?.meta);
   if (!meta) {
+    logProviderParseIssue('yahoo-spark', requestedSymbol, 'missing spark.response[0].meta');
     return null;
   }
 
@@ -284,27 +414,22 @@ async function fetchGlobalEtfFromYahooSpark(symbol: string): Promise<GlobalEtf |
 
 async function fetchGlobalEtfFromYahooChart(symbol: string): Promise<GlobalEtf | null> {
   for (const baseUrl of YAHOO_CHART_API_URLS) {
-    try {
-      const response = await axios.get(`${baseUrl}/${encodeURIComponent(symbol)}`, {
-        headers: {
-          Accept: 'application/json',
-          Referer: 'https://finance.yahoo.com/',
-          'User-Agent': USER_AGENT,
-        },
-        params: {
-          interval: '1d',
-          range: '1d',
-        },
-        decompress: true,
-        timeout: PROVIDER_TIMEOUT_MS,
-      });
+    for (const profile of YAHOO_CHART_REQUEST_PROFILES) {
+      try {
+        const response = await axios.get(`${baseUrl}/${encodeURIComponent(symbol)}`, {
+          headers: profile.buildHeaders(symbol),
+          params: profile.buildParams(),
+          decompress: true,
+          timeout: PROVIDER_TIMEOUT_MS,
+        });
 
-      const parsed = parseYahooChartQuote(response.data, symbol);
-      if (parsed) {
-        return parsed;
+        const parsed = parseYahooChartQuote(response.data, symbol);
+        if (parsed) {
+          return parsed;
+        }
+      } catch (err) {
+        logProviderError(`yahoo-chart(${baseUrl};${profile.providerLabel})`, symbol, err);
       }
-    } catch (err) {
-      logProviderError(`yahoo-chart(${baseUrl})`, symbol, err);
     }
   }
 
@@ -355,11 +480,13 @@ export async function fetchGlobalEtf(symbol: string): Promise<GlobalEtf | null> 
 
     const quotes = response.data?.quoteResponse?.result;
     if (Array.isArray(quotes) && quotes.length > 0) {
-      const firstQuote = mapYahooQuoteToGlobalEtf(quotes[0]);
+      const firstQuote = mapYahooQuoteToGlobalEtf(quotes[0], trimmedSymbol);
       if (firstQuote) {
         await writeEtfCacheEntry(trimmedSymbol, firstQuote);
         return firstQuote;
       }
+
+      logProviderParseIssue('yahoo-quote', trimmedSymbol, 'quoteResponse.result[0] missing required fields');
     }
 
     const sparkQuote = await fetchGlobalEtfFromYahooSpark(trimmedSymbol);

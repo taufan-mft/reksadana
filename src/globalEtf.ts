@@ -109,12 +109,19 @@ function parseStooqQuote(csvRow: string, requestedSymbol: string): GlobalEtf | n
 
 async function fetchGlobalEtfFromStooq(symbol: string): Promise<GlobalEtf | null> {
   const stooqSymbol = toStooqSymbol(symbol);
-  const response = await axios.get<string>(STOOQ_QUOTE_API_URL, {
-    headers: { Accept: 'text/plain', 'User-Agent': USER_AGENT },
-    params: { s: stooqSymbol, i: 'd' },
-    responseType: 'text',
-    decompress: true,
-  });
+  let response;
+
+  try {
+    response = await axios.get<string>(STOOQ_QUOTE_API_URL, {
+      headers: { Accept: 'text/plain', 'User-Agent': USER_AGENT },
+      params: { s: stooqSymbol, i: 'd' },
+      responseType: 'text',
+      decompress: true,
+    });
+  } catch (err) {
+    console.error(`[fetchGlobalEtf] Stooq fetch failed for ${symbol}`, err);
+    throw err;
+  }
 
   if (typeof response.data !== 'string' || !response.data.trim()) {
     return null;
@@ -150,6 +157,8 @@ export async function fetchGlobalEtf(symbol: string): Promise<GlobalEtf | null> 
 
     return fetchGlobalEtfFromStooq(trimmedSymbol);
   } catch (err) {
+    console.error(`[fetchGlobalEtf] Yahoo fetch failed for ${trimmedSymbol}`, err);
+
     if (err instanceof AxiosError) {
       const statusCode = err.response?.status;
       if (statusCode === 401 || statusCode === 403 || statusCode === 404 || statusCode === 429) {

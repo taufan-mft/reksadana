@@ -74,6 +74,14 @@ export interface GlobalEtf {
   price_updated_at: string | null;
 }
 
+export interface GoldPrice {
+  name: string;
+  last_price: number;
+  currency: string | null;
+  exchange: string | null;
+  price_updated_at: string | null;
+}
+
 export interface RawYahooQuote {
   symbol?: string;
   shortName?: string;
